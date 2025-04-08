@@ -1,0 +1,354 @@
+on:
+  workflow_call:
+    secrets:
+      aws-github-oidc-iam-role:
+        required: true
+      slack_webhook_url:
+        required: true
+      npm_token:
+        required: true
+      tfc_token:
+        required: true
+      sentry_auth_token:
+        required: true
+      github-token:
+        required: true
+      service-api-key:
+        required: false  # Make optional for backward compatibility
+    inputs:
+      environment:
+        description: Environment name Staging or Prod
+        required: true
+        type: string
+      service_name:
+        description: Name of Service 
+        required: true
+        type: string
+      header-value:
+        description: Header value for connections services
+        required: false
+        type: string
+      organization:
+        description: Organization Name
+        required: true
+        type: string
+        default: "occasio"
+      cron:
+        description: Cron and API Service
+        default: "false"
+        type: string
+      enable_tf:
+        description: Enable / Disable Terraform Step
+        default: "true"
+        type: string
+      enable_ingress:
+        description: Enable / Disable Ingress for the Service
+        required: true
+        default: true
+        type: boolean
+      enable_status_cake:
+        description: Enable / Disable Status Cake Check
+        required: true
+        default: true
+        type: boolean
+      route53_zoneid:
+        description: Specific Zone for Route53 deployment
+        default: "Z0096696746Q0YA94CUQ"
+        type: string
+      replicas:
+        description: Number of Pods for the app
+        required: false
+        default: "1"
+        type: string
+      hpa_max_replicas:
+        description: Maximum Number of HPA Replicas
+        required: false
+        default: "2"
+        type: string
+      memory_limit:
+        description: Memory Allocation for Application
+        required: false
+        type: string
+      cpu_limit:
+        description: CPU Allocation for Application
+        required: false
+        type: string
+      cron_memory_limit:
+        description: Memory Allocation for Application
+        required: false
+        type: string
+      cron_cpu_limit:
+        description: CPU Allocation for Application
+        required: false
+        type: string
+      monitor_name:
+        description: Name for Status Cake Monitor
+        type: string
+      app_url:
+        description: Service Top-Level Domain Name
+        type: string
+      k8_ingress_url:
+        description: Kubernetes Ingress URL
+        type: string
+      ingress_group:
+        description: Specify a Unique Ingress Group
+        type: string
+      health_check_path:
+        description: Health Check and k8s Probe Path
+        type: string
+      hpa_enabled:
+        description: Enable/Disable HPA
+        default: true
+        type: boolean
+      is_connection_service:
+        description: Flag to indicate if this is a connections service
+        default: false
+        type: boolean
+      
+jobs:
+  infra-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Clone Action Repo
+        uses: actions/checkout@v4
+        with:
+          repository: occasio/gh-actions
+          token: ${{ secrets.github-token }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+          cli_config_credentials_token: ${{ secrets.tfc_token }}
+      
+      - name: Create WorkSpace
+        run: |
+          curl --http1.1 --header "Authorization: Bearer ${{ secrets.tfc_token }}" \
+            --http1.1 --header "Content-Type: application/vnd.api+json" \
+            --request POST \
+            --data "{ \"data\": { \"attributes\": { \"name\": \"${{ inputs.service_name }}-${{ inputs.environment }}\" }, \"type\": \"workspaces\" } }" \
+            https://app.terraform.io/api/v2/organizations/occasio/workspaces
+      
+      - name: TF Workflow
+        if: ${{ inputs.enable_tf }} == "true"
+        id: tfworkflow
+        env:
+          ORGANIZATION: ${{ inputs.organization }}
+          TFC_WORKSPACE_PREFIX: ${{ inputs.service_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          TF_WORKSPACE: ${{ inputs.environment }}
+        run: |
+          if [[ "${{inputs.enable_tf}}" == "true" ]]; then
+            if [[ "${{inputs.is_connection_service}}" == "true" ]]; then
+              # Use connections-specific Terraform configuration
+              cd connections/tf
+              sed "s/{tf-be-name}/${{ inputs.service_name }}/g" backend.tf > backend-new.tf
+              sed "s/{service_name}/${{ inputs.service_name }}/g" variables.tf > variables-new.tf
+              rm -rf backend.tf variables.tf
+            else
+              # Use standard service Terraform configuration
+              cd services/tf
+              sed "s/{tf-svc-name}/${{ inputs.service_name }}/g" backend.tf > backend-new.tf
+              sed 's/{service_name}/${{ inputs.service_name }}/g; s/{k8_ingress_url}/${{ inputs.k8_ingress_url }}/g; s/{route53_zoneid}/${{ inputs.route53_zoneid }}/g; s/{enable_status_cake}/${{ inputs.enable_status_cake }}/g; s/{monitor_name}/${{ inputs.monitor_name }}/g; s/{app_url}/${{ inputs.app_url }}/g; s/{enable_ingress}/${{ inputs.enable_ingress }}/g; s/{environment}/${{ inputs.environment }}/g; s/{health_check_path}/${{ inputs.health_check_path }}/g;' values.auto.tfvars > vals.auto.tfvars
+              rm -rf backend.tf values.auto.tfvars
+              cat vals.auto.tfvars
+            fi
+            terraform fmt -check
+            terraform init
+            terraform apply -auto-approve
+          fi
+          exit 0  
+      
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload Artifact
+        if: ${{ inputs.is_connection_service == 'true' }}
+        uses: actions/upload-artifact@v4.6.0
+        with:
+          name: helmvals
+          path: env-secrets.yaml
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws-github-oidc-iam-role }} 
+          role-session-name: GhActionRoleSession
+          aws-region: region-code
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Image Tag Generator
+        id: vars
+        run: |
+            commit_short_sha="$(git rev-parse --short HEAD)"
+            NEW_TAG="${{ github.run_id}}-${{ github.run_attempt}}-${commit_short_sha}"
+            echo "image_tag=${NEW_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build, Tag, and Push Docker Image to Amazom ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ inputs.service_name }}-${{ inputs.environment }}
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          docker build --build-arg NPM_TOKEN=${{ secrets.npm_token }}  -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
+          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+
+      - name: Slack Status Notifier
+        if: always()
+        uses: ravsamhq/notify-slack-action@v2
+        with:
+          status: ${{ job.status }}
+          notify_when: "failure"
+          notification_title: '{repo}, {workflow}: {status_message}'
+          message_format: '{emoji} *{workflow}* {status_message} in <{repo_url}|{repo}>'
+          footer: 'Repo <{repo_url}|{repo}> | <{run_url}|View Run>'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+ 
+    outputs: 
+      dockerImageTag: ${{ steps.vars.outputs.image_tag }}
+
+  deploy-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    needs: infra-build
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws-github-oidc-iam-role }} 
+          role-session-name: GhActionRoleSession
+          aws-region: region-code
+      
+      - name: Install kubectl and Helm
+        run: |
+          VERSION=$(curl --silent https://storage.googleapis.com/kubernetes-release/release/stable.txt)
+          curl https://storage.googleapis.com/kubernetes-release/release/$VERSION/bin/linux/amd64/kubectl \
+              --progress-bar \
+              --location \
+              --remote-name
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Clone Action Repo
+        uses: actions/checkout@v4
+        with:
+          repository: occasio/gh-actions
+          token: ${{ secrets.github-token }} 
+      
+      - name: Download Artifact for Connections
+        if: ${{ inputs.is_connection_service == 'true' }}
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: helmvals
+          path: connections/connections-chart
+      
+      - name: Rename Values File for Connections
+        if: ${{ inputs.is_connection_service == 'true' }}
+        run: |
+          mv connections/connections-chart/env-secrets.yaml connections/connections-chart/values.yaml
+
+      - name: Rename Values File for Standard Services
+        if: ${{ inputs.is_connection_service != 'true' }}
+        run: |
+          rm -rf services/app-chart/default.values.yaml
+
+      - name: Lint Helm Chart
+        run: |
+          if [[ "${{inputs.is_connection_service}}" == "true" ]]; then
+            helm lint connections/connections-chart
+          else
+            helm lint services/app-chart --set service_name=${{ inputs.service_name }}  --set environment=${{ inputs.environment }} --set cron=${{ inputs.cron }} --set enable_ingress=${{ inputs.enable_ingress }}  --set replicas=${{ inputs.replicas }} --set hpa_max_replicas=${{ inputs.hpa_max_replicas }} --set cron_memory_limit=${{ inputs.cron_memory_limit }} --set cron_cpu_limit=${{ inputs.cron_cpu_limit }}  --set app_url=${{ inputs.app_url }} --set health_check_path=${{ inputs.health_check_path }}
+          fi
+          
+      - name: Deploy App
+        env:
+          IMAGE_TAG: ${{ needs.infra-build.outputs.dockerImageTag }}
+        run: |
+          if [[ "${{inputs.is_connection_service}}" == "true" ]]; then
+            # Deploy using connections-specific chart
+            helm template connections/connections-chart --set service_name=${{ inputs.service_name }}  --set environment=${{ inputs.environment }} --set header_value=${{ inputs.header-value }} --set authorization=${{ secrets.service-api-key }} --set replicas=${{ inputs.replicas }} --set memory_limit=${{ inputs.memory_limit }} --set cpu_limit=${{ inputs.cpu_limit }} --set image_tag=$IMAGE_TAG > kube-deploy.yml
+          else
+            # Deploy using standard service chart
+            helm template services/app-chart --set service_name=${{ inputs.service_name }}  --set environment=${{ inputs.environment }} --set cron=${{ inputs.cron }} --set enable_ingress=${{ inputs.enable_ingress }}  --set replicas=${{ inputs.replicas }} --set hpa_max_replicas=${{ inputs.hpa_max_replicas }} --set memory_limit=${{ inputs.memory_limit }} --set cpu_limit=${{ inputs.cpu_limit }} --set cron_memory_limit=${{ inputs.cron_memory_limit }} --set cron_cpu_limit=${{ inputs.cron_cpu_limit }}  --set app_url=${{ inputs.app_url }} --set health_check_path=${{ inputs.health_check_path }} --set hpa_enabled=${{ inputs.hpa_enabled }} --set image_tag=$IMAGE_TAG > kube-deploy.yml
+          fi
+          
+          cat kube-deploy.yml
+          aws eks update-kubeconfig --name ${{ inputs.environment }} --region region-code
+          kubectl apply -f kube-deploy.yml
+          kubectl rollout status deployment/${{ inputs.service_name }}-${{ inputs.environment }}
+          
+          if [[ "${{inputs.cron}}" == "true" && "${{inputs.is_connection_service}}" != "true" ]]; then
+            kubectl rollout status deployment/${{ inputs.service_name }}-${{ inputs.environment }}-cron
+          fi
+
+      - name: Slack Status Notifier
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always()
+        uses: ravsamhq/notify-slack-action@v2
+        with:
+          status: ${{ job.status }}
+          notify_when: "failure"
+          notification_title: '{repo}, {workflow}: {status_message}'
+          message_format: '{emoji} *{workflow}* {status_message} in <{repo_url}|{repo}>'
+          footer: 'Repo <{repo_url}|{repo}> | <{run_url}|View Run>'
+    outputs: 
+      dockerImageTag: ${{ needs.infra-build.outputs.dockerImageTag }}
+      environment: ${{ inputs.environment }}
+
+  sentry-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    needs: [deploy-app]
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Sentry Release
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.sentry_auth_token }}
+          SENTRY_ORG: ${{ inputs.organization }}
+          SENTRY_PROJECT: ${{ inputs.service_name }}
+          VERSION: ${{ needs.deploy-app.outputs.dockerImageTag }}-${{ inputs.environment }}
+        run: |
+          curl -sL https://sentry.io/get-cli/ | SENTRY_CLI_VERSION="2.2.0" bash
+          sentry-cli releases new "$VERSION"
+          sentry-cli releases set-commits "$VERSION" --auto
+          sentry-cli releases finalize "$VERSION"
+    
+      - name: Tag Deployment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_TAG: ${{ needs.deploy-app.outputs.dockerImageTag }}
+          ENVIRONMENT: ${{ needs.deploy-app.outputs.environment }}
+        run: |
+          git tag $ENVIRONMENT-$DEPLOY_TAG
+          git push origin $ENVIRONMENT-$DEPLOY_TAG
+      
+      - name: Slack Status Notifier
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always()
+        uses: ravsamhq/notify-slack-action@v2
+        with:
+          status: ${{ job.status }}
+          notification_title: 'Deployment {status_message} for <{repo_url}|{repo}>, ${{ inputs.environment }}'
+          message_format: '{emoji}, Branch: <{branch_url}|{branch}>, External URL: ${{ inputs.app_url }} Internal k8s URL: ${{ inputs.service_name }}-${{ inputs.environment }}.default.svc.cluster.local'
+          footer: 'Author: ${{ github.event.head_commit.author.name }} | <{run_url}|View Pipeline>'
