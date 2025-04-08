@@ -1,0 +1,63 @@
+name: Test Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Type of test to run'
+        required: true
+        default: 'connections'
+        type: choice
+        options:
+          - connections
+          - standard
+
+jobs:
+  test-connections-workflow:
+    if: ${{ github.event.inputs.test_type == 'connections' }}
+    uses: ./.github/workflows/action.yml
+    with:
+      environment: staging
+      service_name: test-connection-service
+      header-value: "test-header-value"
+      organization: occasio
+      replicas: "1"
+      memory_limit: "512Mi"
+      cpu_limit: "500m"
+      is_connection_service: true
+      # If needed for non-connection services:
+      monitor_name: "Test Monitor"
+      app_url: "https://staging.test-service.example.com"
+      k8_ingress_url: "test-service-staging.example.internal"
+      health_check_path: "/health"
+    secrets:
+      aws-github-oidc-iam-role: ${{ secrets.aws-github-oidc-iam-role }}
+      slack_webhook_url: ${{ secrets.slack_webhook_url }}
+      npm_token: ${{ secrets.npm_token }}
+      tfc_token: ${{ secrets.tfc_token }}
+      sentry_auth_token: ${{ secrets.sentry_auth_token }}
+      github-token: ${{ secrets.github-token }}
+      service-api-key: ${{ secrets.service-api-key }}
+
+  test-standard-workflow:
+    if: ${{ github.event.inputs.test_type == 'standard' }}
+    uses: ./.github/workflows/action.yml
+    with:
+      environment: staging
+      service_name: test-standard-service
+      organization: occasio
+      replicas: "1"
+      memory_limit: "512Mi"
+      cpu_limit: "500m"
+      is_connection_service: false
+      monitor_name: "Test Standard Monitor"
+      app_url: "https://staging.standard-service.example.com"
+      k8_ingress_url: "standard-service-staging.example.internal"
+      health_check_path: "/health"
+    secrets:
+      aws-github-oidc-iam-role: ${{ secrets.aws-github-oidc-iam-role }}
+      slack_webhook_url: ${{ secrets.slack_webhook_url }}
+      npm_token: ${{ secrets.npm_token }}
+      tfc_token: ${{ secrets.tfc_token }}
+      sentry_auth_token: ${{ secrets.sentry_auth_token }}
+      github-token: ${{ secrets.github-token }}
