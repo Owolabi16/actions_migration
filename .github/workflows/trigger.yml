@@ -16,8 +16,8 @@ jobs:
   test-connections-workflow:
     if: ${{ github.event.inputs.test_type == 'connections' }}
     permissions:
-      id-token: write  # Add this permission
-      contents: read   # Add this permission
+      id-token: write
+      contents: read
     uses: ./.github/workflows/action.yml
     with:
       environment: staging
@@ -40,14 +40,14 @@ jobs:
       npm_token: ${{ secrets.npm_token }}
       tfc_token: ${{ secrets.tfc_token }}
       sentry_auth_token: ${{ secrets.sentry_auth_token }}
-      github-token: ${{ secrets.github-token }}
+      github-token: ${{ secrets.TOKEN }}  # Use your new TOKEN secret
       service-api-key: ${{ secrets.service-api-key }}
 
   test-standard-workflow:
     if: ${{ github.event.inputs.test_type == 'standard' }}
     permissions:
-      id-token: write  # Add this permission
-      contents: read   # Add this permission
+      id-token: write
+      contents: read
     uses: ./.github/workflows/action.yml
     with:
       environment: staging
@@ -69,4 +69,4 @@ jobs:
       npm_token: ${{ secrets.npm_token }}
       tfc_token: ${{ secrets.tfc_token }}
       sentry_auth_token: ${{ secrets.sentry_auth_token }}
-      github-token: ${{ secrets.github-token }}
+      github-token: ${{ secrets.TOKEN }}  # Use your new TOKEN secret
