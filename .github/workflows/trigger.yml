@@ -21,12 +21,14 @@ jobs:
       service_name: test-connection-service
       header-value: "test-header-value"
       organization: occasio
+      enable_ingress: true       # Adding this required parameter
+      enable_status_cake: true   # Adding this required parameter
       replicas: "1"
       memory_limit: "512Mi"
       cpu_limit: "500m"
       is_connection_service: true
-      # If needed for non-connection services:
-      monitor_name: "Test Monitor"
+      # The following might be required for proper validation
+      monitor_name: "Test Monitor Staging"
       app_url: "https://staging.test-service.example.com"
       k8_ingress_url: "test-service-staging.example.internal"
       health_check_path: "/health"
@@ -46,11 +48,13 @@ jobs:
       environment: staging
       service_name: test-standard-service
       organization: occasio
+      enable_ingress: true       # Adding this required parameter
+      enable_status_cake: true   # Adding this required parameter
       replicas: "1"
       memory_limit: "512Mi"
       cpu_limit: "500m"
       is_connection_service: false
-      monitor_name: "Test Standard Monitor"
+      monitor_name: "Test Standard Monitor Staging"
       app_url: "https://staging.standard-service.example.com"
       k8_ingress_url: "standard-service-staging.example.internal"
       health_check_path: "/health"
