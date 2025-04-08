@@ -1,0 +1,12 @@
+appcrendentials:
+  - secretKey: REDIS_URL  
+  - secretKey: PORT
+
+service_name: connections
+environment: dev
+header_value: connect
+image_tag: latest
+replicas: 1
+memory_limit: 400Mi
+cpu_limit: 50m
+authorization: 1234567
