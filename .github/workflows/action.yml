@@ -118,7 +118,7 @@ jobs:
       - name: Clone Action Repo
         uses: actions/checkout@v4
         with:
-          repository: Owolabi16/helm-logic
+          repository: Owolabi16/actions_migration
           token: ${{ secrets.github-token }}
 
       - name: Setup Terraform
