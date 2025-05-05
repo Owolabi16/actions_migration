@@ -147,6 +147,8 @@ jobs:
           if [[ "${{inputs.enable_tf}}" == "true" ]]; then
             if [[ "${{inputs.is_connection_service}}" == "true" ]]; then
               # Use connections-specific Terraform configuration
+              pwd
+              ls -la
               cd connections/tf
               sed "s/{tf-be-name}/${{ inputs.service_name }}/g" backend.tf > backend-new.tf
               sed "s/{service_name}/${{ inputs.service_name }}/g" variables.tf > variables-new.tf
