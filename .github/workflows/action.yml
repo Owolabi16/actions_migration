@@ -341,6 +341,127 @@ jobs:
         run: |
           git tag $ENVIRONMENT-$DEPLOY_TAG
           git push origin $ENVIRONMENT-$DEPLOY_TAG
+
+  resource-cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    if: ${{ inputs.cleanup_resources == 'true' }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Clone Action Repo
+        uses: actions/checkout@v4
+        with:
+          repository: Owolabi16/helm-logic
+          token: ${{ secrets.github-token }}
+      
+      - name: Setup Tools
+        run: |
+          # Install kubectl
+          VERSION=$(curl --silent https://storage.googleapis.com/kubernetes-release/release/stable.txt)
+          curl https://storage.googleapis.com/kubernetes-release/release/$VERSION/bin/linux/amd64/kubectl \
+              --progress-bar \
+              --location \
+              --remote-name
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          
+          # Install Terraform
+          curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+          sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+          sudo apt-get update && sudo apt-get install terraform=1.6.0
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws-github-oidc-iam-role }} 
+          role-session-name: GhActionRoleSession
+          aws-region: region-code
+
+      - name: Clean Up Kubernetes Resources
+        run: |          # Configure kubectl
+          aws eks update-kubeconfig --name ${{ inputs.environment }} --region region-code
+          
+          echo "Cleaning up Kubernetes resources for ${{ inputs.service_name }}-${{ inputs.environment }}..."
+          
+          # Delete deployments
+          kubectl delete deployment ${{ inputs.service_name }}-${{ inputs.environment }} --ignore-not-found=true
+          
+          if [[ "${{ inputs.cron }}" == "true" ]]; then
+            kubectl delete deployment ${{ inputs.service_name }}-${{ inputs.environment }}-cron --ignore-not-found=true
+          fi
+          
+          # Delete services
+          kubectl delete service ${{ inputs.service_name }}-${{ inputs.environment }} --ignore-not-found=true
+          
+          # Delete ingress if enabled
+          if [[ "${{ inputs.enable_ingress }}" == "true" ]]; then
+            kubectl delete ingress ${{ inputs.service_name }}-${{ inputs.environment }} --ignore-not-found=true
+          fi
+          
+          # Delete configmaps and secrets
+          kubectl delete configmap ${{ inputs.service_name }}-${{ inputs.environment }}-config --ignore-not-found=true
+          kubectl delete secret ${{ inputs.service_name }}-${{ inputs.environment }}-secrets --ignore-not-found=true
+          
+          # Delete HPA if enabled
+          if [[ "${{ inputs.hpa_enabled }}" == "true" ]]; then
+            kubectl delete hpa ${{ inputs.service_name }}-${{ inputs.environment }} --ignore-not-found=true
+          fi
+          
+          echo "Kubernetes resources cleanup completed."
+
+      - name: Terraform Destroy
+        if: ${{ inputs.enable_tf == 'true' }}
+        env:
+          TF_CLI_CONFIG_FILE: /dev/null
+          TF_TOKEN_app_terraform_io: ${{ secrets.tfc_token }}
+        run: |
+          echo "Running Terraform destroy..."
+          
+          if [[ "${{ inputs.is_connection_service }}" == "true" ]]; then
+            # Use connections-specific Terraform configuration
+            cd connections/tf
+            sed "s/{tf-be-name}/${{ inputs.service_name }}/g" backend.tf > backend-new.tf
+            sed "s/{service_name}/${{ inputs.service_name }}/g" variables.tf > variables-new.tf
+            rm -rf backend.tf variables.tf
+            mv backend-new.tf backend.tf
+            mv variables-new.tf variables.tf
+          else
+            # Use standard service Terraform configuration
+            cd services/tf
+            sed "s/{tf-svc-name}/${{ inputs.service_name }}/g" backend.tf > backend-new.tf
+            sed 's/{service_name}/${{ inputs.service_name }}/g; s/{k8_ingress_url}/${{ inputs.k8_ingress_url }}/g; s/{route53_zoneid}/${{ inputs.route53_zoneid }}/g; s/{enable_status_cake}/${{ inputs.enable_status_cake }}/g; s/{monitor_name}/${{ inputs.monitor_name }}/g; s/{app_url}/${{ inputs.app_url }}/g; s/{enable_ingress}/${{ inputs.enable_ingress }}/g; s/{environment}/${{ inputs.environment }}/g; s/{health_check_path}/${{ inputs.health_check_path }}/g;' values.auto.tfvars > vals.auto.tfvars
+            rm -rf backend.tf values.auto.tfvars
+            mv backend-new.tf backend.tf
+            mv vals.auto.tfvars values.auto.tfvars
+          fi
+          
+          terraform init
+          terraform destroy -auto-approve
+          
+          echo "Terraform destroy completed."
+
+      - name: Delete Terraform Workspace
+        run: |
+          echo "Deleting Terraform workspace..."
+          
+          # Get workspace ID first
+          WORKSPACE_ID=$(curl --http1.1 --header "Authorization: Bearer ${{ secrets.tfc_token }}" \
+            --request GET \
+            https://app.terraform.io/api/v2/organizations/occasio/workspaces/${{ inputs.service_name }}-${{ inputs.environment }} | grep -o '"id":"ws-[^"]*' | cut -d'"' -f4)
+          
+          if [[ -n "$WORKSPACE_ID" ]]; then
+            # Delete the workspace
+            curl --http1.1 --header "Authorization: Bearer ${{ secrets.tfc_token }}" \
+              --request DELETE \
+              https://app.terraform.io/api/v2/organizations/occasio/workspaces/${{ inputs.service_name }}-${{ inputs.environment }}
+            
+            echo "Terraform workspace deleted: ${{ inputs.service_name }}-${{ inputs.environment }}"
+          else
+            echo "Workspace not found or could not get workspace ID"
+          fi          
       
       - name: Slack Status Notifier
         env:
