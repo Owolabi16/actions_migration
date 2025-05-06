@@ -382,6 +382,38 @@ jobs:
           role-session-name: GhActionRoleSession
           aws-region: region-code
 
+      - name: Sentry Release Cleanup
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.sentry_auth_token }}
+          SENTRY_ORG: ${{ inputs.organization }}
+          SENTRY_PROJECT: ${{ inputs.service_name }}
+        run: |
+          echo "Cleaning up Sentry releases..."
+          
+          # Install Sentry CLI
+          curl -sL https://sentry.io/get-cli/ | SENTRY_CLI_VERSION="2.2.0" bash
+          
+          # List releases for this project
+          RELEASES=$(sentry-cli releases list --project $SENTRY_PROJECT | grep "${{ inputs.service_name }}-${{ inputs.environment }}" || echo "")
+          
+          if [ -n "$RELEASES" ]; then
+            echo "Found Sentry releases to clean up:"
+            echo "$RELEASES"
+            
+            # Extract release versions and delete them
+            echo "$RELEASES" | while read -r release; do
+              if [ -n "$release" ]; then
+                echo "Deleting Sentry release: $release"
+                sentry-cli releases delete "$release" --confirm || echo "Failed to delete release $release, continuing..."
+              fi
+            done
+          else
+            echo "No Sentry releases found for ${{ inputs.service_name }}-${{ inputs.environment }}"
+          fi
+          
+          echo "Sentry release cleanup completed."
+
+
       - name: Clean Up Kubernetes Resources
         run: |          # Configure kubectl
           aws eks update-kubeconfig --name ${{ inputs.environment }} --region region-code
